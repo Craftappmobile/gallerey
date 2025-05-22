@@ -6,27 +6,22 @@ import time
 from datetime import datetime
 
 class GalleryAPITester(unittest.TestCase):
-    def __init__(self, *args, **kwargs):
-        super(GalleryAPITester, self).__init__(*args, **kwargs)
-        self.base_url = "https://e58f9837-0d74-410b-8b57-dfe3f91ff1d2.preview.emergentagent.com/api"
-        self.tests_run = 0
-        self.tests_passed = 0
+    base_url = "https://e58f9837-0d74-410b-8b57-dfe3f91ff1d2.preview.emergentagent.com/api"
+    tests_run = 0
+    tests_passed = 0
 
     def setUp(self):
         # Setup for each test
-        self.tests_run += 1
+        GalleryAPITester.tests_run += 1
         print(f"\n🔍 Running test: {self._testMethodName}")
 
     def tearDown(self):
         # Cleanup after each test
-        if hasattr(self, '_outcome'):
-            result = self.defaultTestResult()
-            self._feedErrorsToResult(result, self._outcome.errors)
-            if result.wasSuccessful():
-                self.tests_passed += 1
-                print(f"✅ Test passed: {self._testMethodName}")
-            else:
-                print(f"❌ Test failed: {self._testMethodName}")
+        if self._outcome.success:
+            GalleryAPITester.tests_passed += 1
+            print(f"✅ Test passed: {self._testMethodName}")
+        else:
+            print(f"❌ Test failed: {self._testMethodName}")
 
     def test_root_endpoint(self):
         """Test the root API endpoint"""
@@ -65,15 +60,11 @@ class GalleryAPITester(unittest.TestCase):
             self.assertIn(self.status_id, status_ids)
 
 def run_tests():
-    # Create a test suite
-    suite = unittest.TestLoader().loadTestsFromTestCase(GalleryAPITester)
-    
     # Run the tests
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    result = unittest.TextTestRunner(verbosity=2).run(unittest.makeSuite(GalleryAPITester))
     
     # Print summary
-    tester = GalleryAPITester()
-    print(f"\n📊 Tests passed: {tester.tests_passed}/{tester.tests_run}")
+    print(f"\n📊 Tests passed: {GalleryAPITester.tests_passed}/{GalleryAPITester.tests_run}")
     
     # Return appropriate exit code
     return 0 if result.wasSuccessful() else 1

@@ -3,6 +3,10 @@ import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { Platform } from 'react-native';
 import { v4 as uuidv4 } from 'uuid';
+import { Q } from '@nozbe/watermelondb';
+
+const THUMBNAIL_SIZE = 300;
+const MAX_IMAGE_SIZE = 1200; // Maximum width/height for stored images to save space
 
 export default class GalleryFileManager {
   constructor(database) {
@@ -26,10 +30,11 @@ export default class GalleryFileManager {
       }
     } catch (error) {
       console.error('Error creating directories:', error);
+      throw new Error(`Failed to create local directories: ${error.message}`);
     }
   }
 
-  async pickImageFromLibrary() {
+  async pickImageFromLibrary(options = {}) {
     try {
       const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
       
@@ -39,8 +44,9 @@ export default class GalleryFileManager {
       
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: false,
-        quality: 0.8,
+        allowsEditing: options.allowsEditing || false,
+        quality: options.quality || 0.8,
+        allowsMultipleSelection: options.allowsMultipleSelection || false,
         exif: true
       });
       
@@ -48,15 +54,25 @@ export default class GalleryFileManager {
         return null;
       }
       
-      const asset = result.assets[0];
-      return await this.processPickedImage(asset.uri, 'library');
+      // Process single or multiple images
+      if (options.allowsMultipleSelection && result.assets.length > 1) {
+        const processedImages = [];
+        for (const asset of result.assets) {
+          const processedImage = await this.processPickedImage(asset.uri, 'library', options);
+          processedImages.push(processedImage);
+        }
+        return processedImages;
+      } else {
+        const asset = result.assets[0];
+        return await this.processPickedImage(asset.uri, 'library', options);
+      }
     } catch (error) {
       console.error('Error picking image from library:', error);
       throw error;
     }
   }
 
-  async takePhoto() {
+  async takePhoto(options = {}) {
     try {
       const permissionResult = await ImagePicker.requestCameraPermissionsAsync();
       
@@ -66,8 +82,8 @@ export default class GalleryFileManager {
       
       const result = await ImagePicker.launchCameraAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: false,
-        quality: 0.8,
+        allowsEditing: options.allowsEditing || false,
+        quality: options.quality || 0.8,
         exif: true
       });
       
@@ -76,23 +92,31 @@ export default class GalleryFileManager {
       }
       
       const asset = result.assets[0];
-      return await this.processPickedImage(asset.uri, 'camera');
+      return await this.processPickedImage(asset.uri, 'camera', options);
     } catch (error) {
       console.error('Error taking photo:', error);
       throw error;
     }
   }
 
-  async processPickedImage(uri, sourceType) {
+  async processPickedImage(uri, sourceType, options = {}) {
     try {
-      const id = uuidv4();
+      const id = options.id || uuidv4();
       const extension = uri.split('.').pop() || 'jpg';
+      
+      // Resize and optimize the image to save storage space
+      const optimizedResult = await ImageManipulator.manipulateAsync(
+        uri,
+        [{ resize: { width: MAX_IMAGE_SIZE } }],
+        { format: ImageManipulator.SaveFormat.JPEG, compress: 0.8 }
+      );
+      
       const fileName = `${id}.${extension}`;
       const localUri = `${this.localImageDirectory}${fileName}`;
       
-      // Copy the image to our app's directory
+      // Copy the optimized image to our app's directory
       await FileSystem.copyAsync({
-        from: uri,
+        from: optimizedResult.uri,
         to: localUri
       });
       
@@ -102,7 +126,7 @@ export default class GalleryFileManager {
       
       const thumbnailResult = await ImageManipulator.manipulateAsync(
         localUri,
-        [{ resize: { width: 300 } }],
+        [{ resize: { width: THUMBNAIL_SIZE } }],
         { format: ImageManipulator.SaveFormat.JPEG, compress: 0.7 }
       );
       
@@ -114,23 +138,74 @@ export default class GalleryFileManager {
       // Get image dimensions and other metadata
       const fileInfo = await FileSystem.getInfoAsync(localUri);
       
+      // Extract EXIF data if available
+      let exifData = {};
+      if (options.exif) {
+        exifData = options.exif;
+      }
+      
       // Create a record in the database
       let imageRecord;
       await this.database.write(async () => {
         imageRecord = await this.database.get('gallery_images').create(image => {
           image.localUri = localUri;
-          image.name = `Image ${new Date().toLocaleDateString()}`;
+          image.name = options.name || `Image ${new Date().toLocaleDateString()}`;
+          image.description = options.description || '';
           image.sourceType = sourceType;
-          image.isPublic = false;
+          image.sourceUrl = options.sourceUrl || null;
+          image.sourceAuthor = options.sourceAuthor || null;
+          image.isPublic = options.isPublic || false;
           image.viewCount = 0;
+          image.userId = options.userId || 'current-user-id'; // This would come from auth context
           image.syncStatus = 'created';
-          image.metadata = JSON.stringify({
+          
+          // Create JSON metadata
+          const metadata = {
             width: thumbnailResult.width,
             height: thumbnailResult.height,
             size: fileInfo.size,
-            createdAt: new Date().toISOString()
-          });
+            createdAt: new Date().toISOString(),
+            exif: exifData
+          };
+          
+          image.metadata = JSON.stringify(metadata);
         });
+        
+        // Add to categories if specified
+        if (options.categories && options.categories.length > 0) {
+          for (const categoryId of options.categories) {
+            await this.database.get('gallery_image_categories').create(relation => {
+              relation.imageId = imageRecord.id;
+              relation.categoryId = categoryId;
+              relation.syncStatus = 'created';
+            });
+          }
+        }
+        
+        // Add tags if specified
+        if (options.tags && options.tags.length > 0) {
+          for (const tagName of options.tags) {
+            // Find or create tag
+            let tag = await this.database.get('gallery_tags')
+              .query(Q.where('name', tagName))
+              .fetch()
+              .then(tags => tags[0]);
+            
+            if (!tag) {
+              tag = await this.database.get('gallery_tags').create(t => {
+                t.name = tagName;
+                t.syncStatus = 'created';
+              });
+            }
+            
+            // Create relation
+            await this.database.get('gallery_image_tags').create(relation => {
+              relation.imageId = imageRecord.id;
+              relation.tagId = tag.id;
+              relation.syncStatus = 'created';
+            });
+          }
+        }
       });
       
       return imageRecord;
@@ -140,9 +215,9 @@ export default class GalleryFileManager {
     }
   }
 
-  async importImageFromUrl(url, sourceType, sourceAuthor = null, sourceName = null) {
+  async importImageFromUrl(url, sourceType, sourceAuthor = null, sourceName = null, options = {}) {
     try {
-      const id = uuidv4();
+      const id = options.id || uuidv4();
       const fileName = `${id}.jpg`;
       const localUri = `${this.localImageDirectory}${fileName}`;
       
@@ -153,13 +228,27 @@ export default class GalleryFileManager {
         throw new Error(`Failed to download image: ${downloadResult.status}`);
       }
       
+      // Optimize the downloaded image
+      const optimizedResult = await ImageManipulator.manipulateAsync(
+        localUri,
+        [{ resize: { width: MAX_IMAGE_SIZE } }],
+        { format: ImageManipulator.SaveFormat.JPEG, compress: 0.8 }
+      );
+      
+      // Replace the downloaded file with the optimized version
+      await FileSystem.deleteAsync(localUri);
+      await FileSystem.copyAsync({
+        from: optimizedResult.uri,
+        to: localUri
+      });
+      
       // Create thumbnail
       const thumbnailFileName = `${id}_thumb.jpg`;
       const thumbnailUri = `${this.localThumbnailDirectory}${thumbnailFileName}`;
       
       const thumbnailResult = await ImageManipulator.manipulateAsync(
         localUri,
-        [{ resize: { width: 300 } }],
+        [{ resize: { width: THUMBNAIL_SIZE } }],
         { format: ImageManipulator.SaveFormat.JPEG, compress: 0.7 }
       );
       
@@ -177,19 +266,48 @@ export default class GalleryFileManager {
         imageRecord = await this.database.get('gallery_images').create(image => {
           image.localUri = localUri;
           image.name = sourceName || `Image from ${sourceType}`;
+          image.description = options.description || '';
           image.sourceType = sourceType;
           image.sourceUrl = url;
           image.sourceAuthor = sourceAuthor;
-          image.isPublic = false;
+          image.isPublic = options.isPublic || false;
           image.viewCount = 0;
+          image.userId = options.userId || 'current-user-id'; // This would come from auth context
           image.syncStatus = 'created';
-          image.metadata = JSON.stringify({
-            width: thumbnailResult.width,
-            height: thumbnailResult.height,
+          
+          // Create JSON metadata
+          const metadata = {
+            width: optimizedResult.width,
+            height: optimizedResult.height,
             size: fileInfo.size,
-            createdAt: new Date().toISOString()
-          });
+            createdAt: new Date().toISOString(),
+            importDate: new Date().toISOString(),
+            sourceType,
+            sourceUrl: url
+          };
+          
+          image.metadata = JSON.stringify(metadata);
         });
+        
+        // Add to categories if specified
+        if (options.categories && options.categories.length > 0) {
+          for (const categoryId of options.categories) {
+            await this.database.get('gallery_image_categories').create(relation => {
+              relation.imageId = imageRecord.id;
+              relation.categoryId = categoryId;
+              relation.syncStatus = 'created';
+            });
+          }
+        }
+        
+        // Add to favorites if specified
+        if (options.addToFavorites) {
+          await this.database.get('gallery_favorites').create(favorite => {
+            favorite.imageId = imageRecord.id;
+            favorite.userId = options.userId || 'current-user-id';
+            favorite.syncStatus = 'created';
+          });
+        }
       });
       
       return imageRecord;
@@ -208,6 +326,13 @@ export default class GalleryFileManager {
         const fileInfo = await FileSystem.getInfoAsync(imageRecord.localUri);
         if (fileInfo.exists) {
           await FileSystem.deleteAsync(imageRecord.localUri);
+        }
+        
+        // Also delete thumbnail if it exists
+        const thumbnailPath = imageRecord.localUri.replace('images', 'thumbnails').replace('.jpg', '_thumb.jpg');
+        const thumbnailInfo = await FileSystem.getInfoAsync(thumbnailPath);
+        if (thumbnailInfo.exists) {
+          await FileSystem.deleteAsync(thumbnailPath);
         }
       }
       
@@ -267,5 +392,86 @@ export default class GalleryFileManager {
       console.error('Error deleting image:', error);
       throw error;
     }
+  }
+
+  // Get free space information
+  async getStorageInfo() {
+    try {
+      const info = await FileSystem.getFreeDiskStorageAsync();
+      const totalSpace = await FileSystem.getTotalDiskCapacityAsync();
+      
+      // Get total size of gallery files
+      const gallerySize = await this.calculateGallerySize();
+      
+      return {
+        freeSpace: info,
+        totalSpace,
+        gallerySize,
+        freeSpaceFormatted: this.formatBytes(info),
+        totalSpaceFormatted: this.formatBytes(totalSpace),
+        gallerySizeFormatted: this.formatBytes(gallerySize)
+      };
+    } catch (error) {
+      console.error('Error getting storage info:', error);
+      return {
+        freeSpace: 0,
+        totalSpace: 0,
+        gallerySize: 0,
+        freeSpaceFormatted: '0 B',
+        totalSpaceFormatted: '0 B',
+        gallerySizeFormatted: '0 B'
+      };
+    }
+  }
+
+  // Calculate total gallery size
+  async calculateGallerySize() {
+    try {
+      let totalSize = 0;
+      
+      // Get images directory size
+      const imagesDirInfo = await FileSystem.getInfoAsync(this.localImageDirectory);
+      if (imagesDirInfo.exists && imagesDirInfo.isDirectory) {
+        const imageFiles = await FileSystem.readDirectoryAsync(this.localImageDirectory);
+        
+        for (const file of imageFiles) {
+          const fileInfo = await FileSystem.getInfoAsync(`${this.localImageDirectory}${file}`);
+          if (fileInfo.exists && !fileInfo.isDirectory) {
+            totalSize += fileInfo.size;
+          }
+        }
+      }
+      
+      // Get thumbnails directory size
+      const thumbnailsDirInfo = await FileSystem.getInfoAsync(this.localThumbnailDirectory);
+      if (thumbnailsDirInfo.exists && thumbnailsDirInfo.isDirectory) {
+        const thumbnailFiles = await FileSystem.readDirectoryAsync(this.localThumbnailDirectory);
+        
+        for (const file of thumbnailFiles) {
+          const fileInfo = await FileSystem.getInfoAsync(`${this.localThumbnailDirectory}${file}`);
+          if (fileInfo.exists && !fileInfo.isDirectory) {
+            totalSize += fileInfo.size;
+          }
+        }
+      }
+      
+      return totalSize;
+    } catch (error) {
+      console.error('Error calculating gallery size:', error);
+      return 0;
+    }
+  }
+
+  // Format bytes to human-readable format
+  formatBytes(bytes, decimals = 2) {
+    if (bytes === 0) return '0 B';
+    
+    const k = 1024;
+    const dm = decimals < 0 ? 0 : decimals;
+    const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+    
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
   }
 }

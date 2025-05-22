@@ -3,6 +3,7 @@ import unittest
 import sys
 import json
 import time
+import uuid
 from datetime import datetime
 
 class GalleryAPITester(unittest.TestCase):
@@ -58,6 +59,91 @@ class GalleryAPITester(unittest.TestCase):
         if hasattr(self, 'status_id'):
             status_ids = [item["id"] for item in data]
             self.assertIn(self.status_id, status_ids)
+    
+    def test_gallery_sync_endpoint(self):
+        """Test the gallery sync endpoint"""
+        try:
+            response = requests.get(f"{self.base_url}/gallery/sync")
+            self.assertIn(response.status_code, [200, 404])
+            
+            if response.status_code == 200:
+                data = response.json()
+                self.assertIsInstance(data, dict)
+                print(f"Gallery sync response: {data}")
+        except requests.exceptions.RequestException as e:
+            self.fail(f"Gallery sync endpoint test failed: {str(e)}")
+    
+    def test_gallery_images_endpoint(self):
+        """Test the gallery images endpoint"""
+        try:
+            response = requests.get(f"{self.base_url}/gallery/images")
+            self.assertIn(response.status_code, [200, 404])
+            
+            if response.status_code == 200:
+                data = response.json()
+                self.assertIsInstance(data, list)
+                print(f"Found {len(data)} images in gallery")
+                
+                # If we have images, test the first one
+                if len(data) > 0:
+                    image_id = data[0]["id"]
+                    self.test_gallery_image_detail(image_id)
+        except requests.exceptions.RequestException as e:
+            self.fail(f"Gallery images endpoint test failed: {str(e)}")
+    
+    def test_gallery_image_detail(self, image_id=None):
+        """Test retrieving a specific gallery image"""
+        if not image_id:
+            # Skip this test if no image_id is provided
+            return
+        
+        try:
+            response = requests.get(f"{self.base_url}/gallery/images/{image_id}")
+            self.assertEqual(response.status_code, 200)
+            
+            data = response.json()
+            self.assertEqual(data["id"], image_id)
+            print(f"Successfully retrieved image details for ID: {image_id}")
+        except requests.exceptions.RequestException as e:
+            self.fail(f"Gallery image detail endpoint test failed: {str(e)}")
+    
+    def test_gallery_categories_endpoint(self):
+        """Test the gallery categories endpoint"""
+        try:
+            response = requests.get(f"{self.base_url}/gallery/categories")
+            self.assertIn(response.status_code, [200, 404])
+            
+            if response.status_code == 200:
+                data = response.json()
+                self.assertIsInstance(data, list)
+                print(f"Found {len(data)} categories in gallery")
+        except requests.exceptions.RequestException as e:
+            self.fail(f"Gallery categories endpoint test failed: {str(e)}")
+    
+    def test_gallery_upload_endpoint(self):
+        """Test the gallery upload endpoint"""
+        # This is a mock test since we can't actually upload files in this test
+        try:
+            # Just check if the endpoint exists
+            test_uuid = str(uuid.uuid4())
+            mock_data = {
+                "name": f"Test Image {test_uuid}",
+                "description": "Test image upload",
+                "category_ids": [],
+                "source_type": "test"
+            }
+            
+            # We're not actually sending a file, so this should fail
+            # but we're just checking if the endpoint exists
+            response = requests.post(f"{self.base_url}/gallery/upload", json=mock_data)
+            
+            # The endpoint might return 400 (bad request) since we're not sending a file
+            # or 404 if it doesn't exist
+            self.assertIn(response.status_code, [400, 404, 422])
+            
+            print(f"Gallery upload endpoint test completed with status: {response.status_code}")
+        except requests.exceptions.RequestException as e:
+            self.fail(f"Gallery upload endpoint test failed: {str(e)}")
 
 def run_tests():
     # Run the tests

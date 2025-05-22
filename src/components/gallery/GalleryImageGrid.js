@@ -1,9 +1,11 @@
-import React from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, Dimensions } from 'react-native';
+import React, { useState, useEffect, useCallback } from 'react';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, Dimensions, ActivityIndicator, RefreshControl } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useNavigation } from '@react-navigation/native';
 import { useSyncStatus } from '../../contexts/SyncContext';
+
+const ITEMS_PER_PAGE = 20; // Number of images to load at once
 
 const GalleryImageGrid = ({ 
   images, 
@@ -12,11 +14,63 @@ const GalleryImageGrid = ({
   onImageLongPress,
   showSource = true,
   showFavorite = true,
+  enablePagination = true, // Enable pagination for large sets
+  onRefresh = null, // Callback for pull-to-refresh
+  isRefreshing = false, // Control refreshing state externally
 }) => {
   const navigation = useNavigation();
   const { isConnected } = useSyncStatus();
   const screenWidth = Dimensions.get('window').width;
   const imageWidth = (screenWidth - 48) / numColumns; // 48 = padding and gaps
+  
+  const [displayImages, setDisplayImages] = useState([]);
+  const [page, setPage] = useState(1);
+  const [isLoading, setIsLoading] = useState(false);
+  const [hasMore, setHasMore] = useState(true);
+
+  // Initialize with first page
+  useEffect(() => {
+    if (!images || images.length === 0) {
+      setDisplayImages([]);
+      setPage(1);
+      setHasMore(false);
+      return;
+    }
+    
+    if (enablePagination) {
+      const initialImages = images.slice(0, ITEMS_PER_PAGE);
+      setDisplayImages(initialImages);
+      setHasMore(images.length > ITEMS_PER_PAGE);
+      setPage(1);
+    } else {
+      setDisplayImages(images);
+      setHasMore(false);
+    }
+  }, [images, enablePagination]);
+
+  const loadMoreImages = useCallback(() => {
+    if (!hasMore || isLoading || !enablePagination) return;
+    
+    setIsLoading(true);
+    
+    // Simulate a delay to show loading indicator
+    setTimeout(() => {
+      const nextPage = page + 1;
+      const startIndex = (nextPage - 1) * ITEMS_PER_PAGE;
+      const endIndex = startIndex + ITEMS_PER_PAGE;
+      const newImages = images.slice(startIndex, endIndex);
+      
+      if (newImages.length > 0) {
+        setDisplayImages(prev => [...prev, ...newImages]);
+        setPage(nextPage);
+        setHasMore(endIndex < images.length);
+      } else {
+        setHasMore(false);
+      }
+      
+      setIsLoading(false);
+    }, 500);
+  }, [hasMore, isLoading, page, images, enablePagination]);
 
   const handleImagePress = (image) => {
     if (onImagePress) {
@@ -61,6 +115,7 @@ const GalleryImageGrid = ({
           contentFit="cover"
           transition={200}
           placeholder={{ uri: item.thumbnailPath }}
+          cachePolicy="memory-disk"
         />
         
         <View style={styles.imageOverlay}>
@@ -90,23 +145,54 @@ const GalleryImageGrid = ({
     );
   };
 
-  if (!images || images.length === 0) {
+  const renderFooter = () => {
+    if (!isLoading || !hasMore) return null;
+    
     return (
-      <View style={styles.emptyContainer}>
-        <Ionicons name="images-outline" size={48} color="#ccc" />
-        <Text style={styles.emptyText}>Немає зображень</Text>
+      <View style={styles.loaderContainer}>
+        <ActivityIndicator size="small" color="#007AFF" />
+        <Text style={styles.loaderText}>Завантаження...</Text>
       </View>
     );
-  }
+  };
+
+  const renderEmptyComponent = () => {
+    if (images.length === 0) {
+      return (
+        <View style={styles.emptyContainer}>
+          <Ionicons name="images-outline" size={48} color="#ccc" />
+          <Text style={styles.emptyText}>Немає зображень</Text>
+        </View>
+      );
+    }
+    return null;
+  };
 
   return (
     <FlatList
-      data={images}
+      data={displayImages}
       renderItem={renderImageItem}
       keyExtractor={item => item.id}
       numColumns={numColumns}
-      contentContainerStyle={styles.gridContainer}
-      columnWrapperStyle={styles.columnWrapper}
+      contentContainerStyle={[
+        styles.gridContainer, 
+        displayImages.length === 0 && styles.emptyGridContainer
+      ]}
+      columnWrapperStyle={numColumns > 1 ? styles.columnWrapper : null}
+      onEndReached={loadMoreImages}
+      onEndReachedThreshold={0.5}
+      ListFooterComponent={renderFooter}
+      ListEmptyComponent={renderEmptyComponent}
+      refreshControl={
+        onRefresh ? (
+          <RefreshControl
+            refreshing={isRefreshing}
+            onRefresh={onRefresh}
+            colors={['#007AFF']}
+            tintColor="#007AFF"
+          />
+        ) : null
+      }
     />
   );
 };
@@ -114,6 +200,12 @@ const GalleryImageGrid = ({
 const styles = StyleSheet.create({
   gridContainer: {
     padding: 16,
+    flexGrow: 1,
+  },
+  emptyGridContainer: {
+    justifyContent: 'center',
+    alignItems: 'center',
+    flex: 1,
   },
   columnWrapper: {
     justifyContent: 'space-between',
@@ -125,6 +217,10 @@ const styles = StyleSheet.create({
     elevation: 2,
     backgroundColor: '#f0f0f0',
     position: 'relative',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
   },
   image: {
     width: '100%',
@@ -177,6 +273,16 @@ const styles = StyleSheet.create({
   emptyText: {
     marginTop: 10,
     fontSize: 16,
+    color: '#666',
+  },
+  loaderContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 20,
+    flexDirection: 'row',
+  },
+  loaderText: {
+    marginLeft: 8,
     color: '#666',
   },
 });
